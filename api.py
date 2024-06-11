@@ -8,8 +8,9 @@ import cv2
 import os
 import time
 from functools import wraps
-
-
+import base64
+import logging
+from io import BytesIO
 
 app = FastAPI()
 
@@ -30,12 +31,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Directories
+imageDirectory = "uploadedFile"  # Store uploaded image in this folder
+resultDirectory = "runs/detect/predict"  # YOLO detection results directory
 
-imageDirectory = "uploadedFile" # store uploaded image in this folder
+# Ensure directories exist
+os.makedirs(imageDirectory, exist_ok=True)
+os.makedirs(resultDirectory, exist_ok=True)
 
-if not os.path.exists(imageDirectory):
-    os.makedirs(imageDirectory)
-
+# Load YOLO model
 model = YOLO("best (3).pt")
 
 def rate_limited(max_calls: int, time_frame: int):
@@ -55,28 +59,24 @@ def rate_limited(max_calls: int, time_frame: int):
 
     return decorator
 
-
 def objectDetector(filename):
     print(f"=========================Ini filename: {filename}")
-    results = model.predict(source=f"{imageDirectory}/{filename}", show=True, conf=0.5, save = True, exist_ok=True)
-    
-    imagePath = "runs/detect/predict/" + filename
-
+    results = model.predict(source=f"{imageDirectory}/{filename}", show=True, conf=0.5, save=True, exist_ok=True)
+    imagePath = f"{resultDirectory}/{filename}"
     return imagePath
 
 @app.get("/")
-@rate_limited(max_calls=10, time_frame=30) # decorator to limit request
+@rate_limited(max_calls=100, time_frame=60)  # decorator to limit request
 async def index():
-    return {"message": "Hellow World"}
-
+    return {"message": "Hello World"}
 
 @app.post("/upload")
-#@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
+# @rate_limited(max_calls=100, time_frame=60)  # decorator to limit request
 async def uploadFile(file: UploadFile = File(...)):
     file.filename = f"{uuid.uuid4()}.jpg"
     contents = await file.read()
 
-    #save the file
+    # Save the file
     with open(f"{imageDirectory}/{file.filename}", "wb") as f:
         f.write(contents)
 
@@ -84,7 +84,7 @@ async def uploadFile(file: UploadFile = File(...)):
     return FileResponse(imagePath)
 
 @app.post("/uploadFileBase64")
-#@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
+# @rate_limited(max_calls=100, time_frame=60)  # decorator to limit request
 async def uploadFileBase64(request: Request):
     try:
         data = await request.json()
@@ -113,15 +113,19 @@ async def uploadFileBase64(request: Request):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 @app.get("/detectedImage")
-# @rate_limited(max_calls=100, time_frame=60) # decorator to limit request
+# @rate_limited(max_calls=100, time_frame=60)  # decorator to limit request
 async def showImage():
-    if (os.path.exists("result.png")):
-        imagePath = "result.png"
-        return FileResponse(imagePath)
+    # Assuming only one file in the result directory for simplicity
+    detected_images = os.listdir(resultDirectory)
+    if detected_images:
+        imagePath = f"{resultDirectory}/{detected_images[-1]}"  # Get the latest image
+        if os.path.exists(imagePath):
+            return FileResponse(imagePath)
+        else:
+            return {"status": "error", "detail": "No result image found"}
     else:
-        return {"status", "error"}
-
+        return {"status": "error", "detail": "No images in the results directory"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001, log_level="info") # adjust port
+    uvicorn.run(app, host="127.0.0.1", port=8001, log_level="info")  # adjust port
