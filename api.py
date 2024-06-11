@@ -36,7 +36,7 @@ imageDirectory = "uploadedFile" # store uploaded image in this folder
 if not os.path.exists(imageDirectory):
     os.makedirs(imageDirectory)
 
-model = YOLO("C:/Users/ASUS/Downloads/fastapi-object-detection-main/fastapi-object-detection-main/best (3).pt")
+model = YOLO("best (3).pt")
 
 def rate_limited(max_calls: int, time_frame: int):
     def decorator(func):
@@ -65,7 +65,7 @@ def objectDetector(filename):
     return imagePath
 
 @app.get("/")
-@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
+@rate_limited(max_calls=10, time_frame=30) # decorator to limit request
 async def index():
     return {"message": "Hellow World"}
 
@@ -83,6 +83,29 @@ async def uploadFile(file: UploadFile = File(...)):
     imagePath = objectDetector(file.filename)
     return FileResponse(imagePath)
 
+@app.post("/uploadFileBase64")
+#@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
+async def uploadFileBase64(request: Request):
+    data = await request.json()
+    base64_image = data.get('image')
+    if not base64_image:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No image provided")
+
+    # Decode the base64 image
+    try:
+        image_data = base64.b64decode(base64_image)
+        np_image = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid base64 image")
+
+    # Save the decoded image
+    filename = f"{uuid.uuid4()}.jpg"
+    filepath = f"{imageDirectory}/{filename}"
+    cv2.imwrite(filepath, img)
+
+    imagePath = objectDetector(filename)
+    return FileResponse(imagePath)
 
 @app.get("/detectedImage")
 # @rate_limited(max_calls=100, time_frame=60) # decorator to limit request
