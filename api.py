@@ -86,26 +86,31 @@ async def uploadFile(file: UploadFile = File(...)):
 @app.post("/uploadFileBase64")
 #@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
 async def uploadFileBase64(request: Request):
-    data = await request.json()
-    base64_image = data.get('image')
-    if not base64_image:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No image provided")
-
-    # Decode the base64 image
     try:
-        image_data = base64.b64decode(base64_image)
-        np_image = np.frombuffer(image_data, np.uint8)
-        img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
+        data = await request.json()
+        base64_image = data.get('image')
+        if not base64_image:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No image provided")
+
+        # Decode the base64 image
+        try:
+            image_data = base64.b64decode(base64_image)
+            np_image = np.frombuffer(image_data, np.uint8)
+            img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
+        except Exception as e:
+            logging.error(f"Error decoding base64 image: {e}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid base64 image")
+
+        # Save the decoded image
+        filename = f"{uuid.uuid4()}.jpg"
+        filepath = f"{imageDirectory}/{filename}"
+        cv2.imwrite(filepath, img)
+
+        imagePath = objectDetector(filename)
+        return FileResponse(imagePath)
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid base64 image")
-
-    # Save the decoded image
-    filename = f"{uuid.uuid4()}.jpg"
-    filepath = f"{imageDirectory}/{filename}"
-    cv2.imwrite(filepath, img)
-
-    imagePath = objectDetector(filename)
-    return FileResponse(imagePath)
+        logging.error(f"Unexpected error: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 @app.get("/detectedImage")
 # @rate_limited(max_calls=100, time_frame=60) # decorator to limit request
