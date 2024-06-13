@@ -3,14 +3,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
 from ultralytics import YOLO
+from ultralytics.yolo.utils.plotting import Annotator
+import supervision as sv
 import numpy as np
 import cv2
 import os
 import time
 from functools import wraps
-import base64
-import logging
-from io import BytesIO
 
 app = FastAPI()
 
@@ -31,16 +30,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Directories
-imageDirectory = "uploadedFile"  # Store uploaded image in this folder
-resultDirectory = "runs/detect/predict"  # YOLO detection results directory
 
-# Ensure directories exist
-os.makedirs(imageDirectory, exist_ok=True)
-os.makedirs(resultDirectory, exist_ok=True)
+imageDirectory = "uploadedFile" # store uploaded image in this folder
 
-# Load YOLO model
-model = YOLO("best (3).pt")
+if not os.path.exists(imageDirectory):
+    os.makedirs(imageDirectory)
+
+model = YOLO("best (3).pt") #
 
 def rate_limited(max_calls: int, time_frame: int):
     def decorator(func):
@@ -59,73 +55,104 @@ def rate_limited(max_calls: int, time_frame: int):
 
     return decorator
 
+
 def objectDetector(filename):
-    print(f"=========================Ini filename: {filename}")
-    results = model.predict(source=f"{imageDirectory}/{filename}", show=True, conf=0.5, save=True, exist_ok=True)
-    imagePath = f"{resultDirectory}/{filename}"
-    return imagePath
+    print("------------------------", filename)
+    frame = cv2.imread("uploadedFile/" + filename)
+    results = model(frame, conf=0.7)[0]
+
+    detections = sv.Detections.from_yolov8(results)
+    results = detections.with_nms(threshold=0.5)
+    class_name = ""
+    confidence = 0.0
+    bbox = results.xyxy # get box coordinates in (top, left, bottom, right) format
+    bbox_class = results.class_id # cls, (N, )
+    for r in results:
+        '''
+            index 0: bounding box
+            index 1: mask
+            index 2: confidence
+            index 3: class_id
+            index 4: tracker_id
+        '''
+        frame = np.ascontiguousarray(frame)
+        annotator = Annotator(frame)
+        box = r[0]
+        confidence = r[2]
+        class_id = r[3]
+
+        # get class name
+        class_name = model.names[int(class_id)]
+
+        # draw label
+        annotator.box_label(box, class_name + ' ' + str(int(confidence * 100)) + '%', color=(0, 0, 255), txt_color=(255, 255, 255))
+        frame = annotator.result()
+
+    jsonResult = {
+        "status": "error"
+    }
+
+    bbox_json = {}
+    cv2.imwrite("result.png", frame)
+    if class_name is not None and class_name != "":
+        print(f"=====CLASSNAME===={class_name}")
+        print(f"===========INI BBOX: {bbox}")
+        if bbox is not None and len(bbox) > 0:
+            x1, y1, x2, y2 = bbox[0]
+            centroid_x = float((x1 + x2) / 2) 
+            centroid_y = float((y1 + y2) / 2) 
+
+            bbox_json = {
+                "x1": float(x1), 
+                "y1": float(y1), 
+                "x2": float(x2), 
+                "y2": float(y2), 
+                "centroid_x": centroid_x,
+                "centroid_y": centroid_y
+            }
+
+        jsonResult = {
+            "status": "successful",
+            "bbox": bbox_json,
+            "class_name": class_name,
+            "confidence": float(confidence),
+             "path": "result.png",
+        }
+
+    JSONResponse(jsonResult)
+
 
 @app.get("/")
-@rate_limited(max_calls=100, time_frame=60)  # decorator to limit request
+@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
 async def index():
-    return {"message": "Hello World"}
+    return {"message": "Hellow World"}
+
 
 @app.post("/upload")
-# @rate_limited(max_calls=100, time_frame=60)  # decorator to limit request
+#@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
 async def uploadFile(file: UploadFile = File(...)):
     file.filename = f"{uuid.uuid4()}.jpg"
     contents = await file.read()
 
-    # Save the file
+    #save the file
     with open(f"{imageDirectory}/{file.filename}", "wb") as f:
         f.write(contents)
 
-    imagePath = objectDetector(file.filename)
-    return FileResponse(imagePath)
+    detectionResult = objectDetector(file.filename)
+    print("============================", detectionResult)
+    return JSONResponse(detectionResult)
 
-@app.post("/uploadFileBase64")
-# @rate_limited(max_calls=100, time_frame=60)  # decorator to limit request
-async def uploadFileBase64(request: Request):
-    try:
-        data = await request.json()
-        base64_image = data.get('image')
-        if not base64_image:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No image provided")
-
-        # Decode the base64 image
-        try:
-            image_data = base64.b64decode(base64_image)
-            np_image = np.frombuffer(image_data, np.uint8)
-            img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
-        except Exception as e:
-            logging.error(f"Error decoding base64 image: {e}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid base64 image")
-
-        # Save the decoded image
-        filename = f"{uuid.uuid4()}.jpg"
-        filepath = f"{imageDirectory}/{filename}"
-        cv2.imwrite(filepath, img)
-
-        imagePath = objectDetector(filename)
-        return FileResponse(imagePath)
-    except Exception as e:
-        logging.error(f"Unexpected error: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 @app.get("/detectedImage")
-# @rate_limited(max_calls=100, time_frame=60)  # decorator to limit request
+# @rate_limited(max_calls=100, time_frame=60) # decorator to limit request
 async def showImage():
-    # Assuming only one file in the result directory for simplicity
-    detected_images = os.listdir(resultDirectory)
-    if detected_images:
-        imagePath = f"{resultDirectory}/{detected_images[-1]}"  # Get the latest image
-        if os.path.exists(imagePath):
-            return FileResponse(imagePath)
-        else:
-            return {"status": "error", "detail": "No result image found"}
+    if (os.path.exists("result.png")):
+        imagePath = "result.png"
+        return FileResponse(imagePath)
     else:
-        return {"status": "error", "detail": "No images in the results directory"}
+        return {"status", "error"}
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001, log_level="info")  # adjust port
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info") # adjust port 
