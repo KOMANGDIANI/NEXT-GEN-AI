@@ -1,25 +1,24 @@
-from fastapi import FastAPI, File, UploadFile, Request, status, HTTPException
+from fastapi import FastAPI, File, UploadFile, status, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
-from ultralytics import YOLO
-from ultralytics.yolo.utils.plotting import Annotator
-import supervision as sv
 import numpy as np
 import cv2
 import os
 import time
 from functools import wraps
+from keras.models import load_model
+from ultralytics import YOLO
+from ultralytics.utils.plotting import Annotator
+import supervision as sv
 
 app = FastAPI()
 
-'''
-    Allow CORS
-'''
+# Allow CORS
 origins = [
     "http://localhost:3000",  # React
     "http://localhost:8080",  # Vue.js
-    "http://localhost:8000",  # Angular
+    "http://localhost:8002",  # Angular
 ]
 
 app.add_middleware(
@@ -30,13 +29,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-imageDirectory = "uploadedFile" # store uploaded image in this folder
+imageDirectory = "uploadedFile"  # store uploaded image in this folder
 
 if not os.path.exists(imageDirectory):
     os.makedirs(imageDirectory)
 
-model = YOLO("best (3).pt") #
+model = YOLO("best (3).pt")
+
+
+ 
 
 def rate_limited(max_calls: int, time_frame: int):
     def decorator(func):
@@ -49,7 +50,7 @@ def rate_limited(max_calls: int, time_frame: int):
             if len(calls_in_time_frame) >= max_calls:
                 raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded!")
             calls.append(now)
-            return await func(*args, *kwargs)
+            return await func(*args, **kwargs)
 
         return wrapper
 
@@ -57,101 +58,105 @@ def rate_limited(max_calls: int, time_frame: int):
 
 
 def objectDetector(filename):
-    print("------------------------", filename)
-    frame = cv2.imread("uploadedFile/" + filename)
-    results = model(frame, conf=0.7)[0]
+    try:
+        print("------------------------", filename)
+        frame = cv2.imread("uploadedFile/" + filename)
+        if frame is None:
+            raise ValueError("Image not loaded correctly")
 
-    detections = sv.Detections.from_yolov8(results)
-    results = detections.with_nms(threshold=0.5)
-    class_name = ""
-    confidence = 0.0
-    bbox = results.xyxy # get box coordinates in (top, left, bottom, right) format
-    bbox_class = results.class_id # cls, (N, )
-    for r in results:
-        '''
-            index 0: bounding box
-            index 1: mask
-            index 2: confidence
-            index 3: class_id
-            index 4: tracker_id
-        '''
-        frame = np.ascontiguousarray(frame)
-        annotator = Annotator(frame)
-        box = r[0]
-        confidence = r[2]
-        class_id = r[3]
+        start_time = time.time()
+        results = model(frame, conf=0.7, save=True)[0]
+        inference_time = time.time() - start_time
 
-        # get class name
-        class_name = model.names[int(class_id)]
+        print(f"Speed: {inference_time * 1000:.1f}ms inference per image at shape {frame.shape}")
 
-        # draw label
-        annotator.box_label(box, class_name + ' ' + str(int(confidence * 100)) + '%', color=(0, 0, 255), txt_color=(255, 255, 255))
-        frame = annotator.result()
+        detections = sv.Detections.from_ultralytics(results)
+        results = detections.with_nms(threshold=0.5)
 
-    jsonResult = {
-        "status": "error"
-    }
+        if len(results) == 0:
+            return {"status": "no detections"}
 
-    bbox_json = {}
-    cv2.imwrite("result.png", frame)
-    if class_name is not None and class_name != "":
-        print(f"=====CLASSNAME===={class_name}")
-        print(f"===========INI BBOX: {bbox}")
-        if bbox is not None and len(bbox) > 0:
-            x1, y1, x2, y2 = bbox[0]
-            centroid_x = float((x1 + x2) / 2) 
-            centroid_y = float((y1 + y2) / 2) 
+        class_name = ""
+        confidence = 0.0
+        bbox_list = []
+        bbox = results.xyxy  # get box coordinates in (top, left, bottom, right) format
+        bbox_class = results.class_id  # cls, (N, )
 
-            bbox_json = {
-                "x1": float(x1), 
-                "y1": float(y1), 
-                "x2": float(x2), 
-                "y2": float(y2), 
-                "centroid_x": centroid_x,
-                "centroid_y": centroid_y
-            }
+        for r in results:
+            frame = np.ascontiguousarray(frame)
+            annotator = Annotator(frame)
+            box = r[0]
+            confidence = r[2]
+            class_id = r[3]
+
+            class_name = model.names[int(class_id)]
+            annotator.box_label(box, class_name + ' ' + str(int(confidence * 100)) + '%', color=(0, 0, 255), txt_color=(255, 255, 255))
+            frame = annotator.result()
+
+            bbox_list.append({
+                "x1": float(box[0]),
+                "y1": float(box[1]),
+                "x2": float(box[2]),
+                "y2": float(box[3]),
+                "confidence": float(confidence),
+                "class_name": class_name
+            })
 
         jsonResult = {
-            "status": "successful",
-            "bbox": bbox_json,
-            "class_name": class_name,
-            "confidence": float(confidence),
-             "path": "result.png",
+            "status": "error"
         }
 
-    JSONResponse(jsonResult)
+        cv2.imwrite("result.png", frame)
+        if class_name is not None and class_name != "":
+            jsonResult = {
+                "status": "successful",
+                "bbox_list": bbox_list,
+                "class_name": class_name,
+                "confidence": float(confidence),
+                "path": "result.png",
+                "inference_time_ms": inference_time * 1000
+            }
 
+        return jsonResult
+    except Exception as e:
+        print("Error during object detection:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
-@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
+@rate_limited(max_calls=100, time_frame=60)  # decorator to limit requests
 async def index():
-    return {"message": "Hellow World"}
-
+    return {"message": "Hello World"}
 
 @app.post("/upload")
-#@rate_limited(max_calls=100, time_frame=60) # decorator to limit request
 async def uploadFile(file: UploadFile = File(...)):
-    file.filename = f"{uuid.uuid4()}.jpg"
-    contents = await file.read()
+    try:
+        file.filename = f"{uuid.uuid4()}.jpg"
+        contents = await file.read()
 
-    #save the file
-    with open(f"{imageDirectory}/{file.filename}", "wb") as f:
-        f.write(contents)
+        # Save the file
+        with open(f"{imageDirectory}/{file.filename}", "wb") as f:
+            f.write(contents)
 
-    detectionResult = objectDetector(file.filename)
-    print("============================", detectionResult)
-    return JSONResponse(detectionResult)
+        detectionResult = objectDetector(file.filename)
+        print("============================", detectionResult)
+        return JSONResponse(detectionResult)
+    except Exception as e:
+        print("Error during file upload:", str(e))
+        raise HTTPException(status_code=500, detail="File upload failed")
+
 
 @app.get("/detectedImage")
-# @rate_limited(max_calls=100, time_frame=60) # decorator to limit request
 async def showImage():
-    if (os.path.exists("result.png")):
-        imagePath = "result.png"
-        return FileResponse(imagePath)
-    else:
-        return {"status", "error"}
-
+    try:
+        if os.path.exists("result.png"):
+            imagePath = "result.png"
+            return FileResponse(imagePath)
+        else:
+            return JSONResponse({"status": "error"})
+    except Exception as e:
+        print("Error during image retrieval:", str(e))
+        raise HTTPException(status_code=500, detail="Image retrieval failed")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001, log_level="info") # adjust port 
+    uvicorn.run(app, host="127.0.0.1", port=8001, log_level="info")
